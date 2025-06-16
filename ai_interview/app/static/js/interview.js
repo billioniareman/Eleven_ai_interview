@@ -1,52 +1,14 @@
 // interview.js
-// ...existing code...
 document.addEventListener('DOMContentLoaded', function() {
-    // Handle resume upload
-    const resumeForm = document.getElementById('resumeForm');
-    if (resumeForm) {
-        resumeForm.addEventListener('submit', handleResumeUpload);
-    }
-
     // Initialize interview if on interview page
-    if (window.location.pathname === '/interview') {
+    if (window.location.pathname.startsWith('/interview/')) {
         initializeInterview();
     }
 });
 
-async function handleResumeUpload(e) {
-    e.preventDefault();
-    
-    const formData = new FormData();
-    const resumeFile = document.getElementById('resumeFile').files[0];
-    formData.append('resume', resumeFile);
-    
-    try {
-        const response = await fetch('/upload_resume', {
-            method: 'POST',
-            body: formData
-        });
-        
-        const data = await response.json();
-        if (data.status === 'success') {
-            // Store interview context in sessionStorage
-            sessionStorage.setItem('interviewContext', JSON.stringify(data.context));
-            // Redirect to interview page
-            window.location.href = '/interview';
-        } else {
-            alert('Error: ' + data.error);
-        }
-    } catch (error) {
-        console.error('Error:', error);
-        alert('Error uploading resume');
-    }
-}
-
 function initializeInterview() {
-    const context = JSON.parse(sessionStorage.getItem('interviewContext'));
-    if (!context) {
-        window.location.href = '/';
-        return;
-    }
+    // Interview context is now handled server-side after token validation
+    // You may fetch candidate info if needed via AJAX
     
     // Initialize ElevenLabs widget
     const widget = document.querySelector('elevenlabs-convai');

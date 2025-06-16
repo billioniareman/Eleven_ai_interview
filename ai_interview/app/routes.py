@@ -1,67 +1,64 @@
-from flask import Blueprint, render_template, request, jsonify, current_app
+from flask import Blueprint, render_template, request, jsonify, current_app, abort
 from app.interview_agent import InterviewAgent
-from app.resume_parser import ResumeParser
 from flask_socketio import emit
 from app import socketio
 import json
 from datetime import datetime
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
+import os
 
 main = Blueprint('main', __name__)
 interview_agent = None
+
+# Connect to invite_send DB for token validation
+INVITE_DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../instance/invite_send.db'))
+engine = create_engine(f'sqlite:///{INVITE_DB_PATH}')
+Session = sessionmaker(bind=engine)
 
 @main.route('/')
 def index():
     return render_template('index.html')
 
-@main.route('/interview')
-def interview():
-    return render_template('interview.html')
-
-@main.route('/upload_resume', methods=['POST'])
-def upload_resume():
+@main.route('/interview/<token>')
+def interview(token):
+    # Validate token from invite_send
+    session = Session()
+    result = session.execute(text("SELECT * FROM invite WHERE token = :token"), {'token': token}).fetchone()
+    if not result:
+        abort(404, 'Invalid or expired interview link.')
+    
+    # Access columns by index since we're using raw SQL
+    # Columns order: id, email, token, form_data, created_at, expires_at, is_used
+    expires_at = result[5]  # expires_at is at index 5
+    is_used = result[6]     # is_used is at index 6
+    form_data = result[3]   # form_data is at index 3
+    
+    if is_used or datetime.utcnow() > datetime.fromisoformat(expires_at):
+        abort(403, 'Interview link expired or already used.')
+    
+    # Get candidate info - parse JSON string if it exists
+    candidate_info = json.loads(form_data) if form_data else {}
+    
+    # Start interview session (context)
     global interview_agent
-    
-    if 'resume' not in request.files:
-        return jsonify({'error': 'No resume file uploaded'}), 400
-    
-    resume_file = request.files['resume']
-    if resume_file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
-    
-    try:
-        # Initialize parser and agent
-        resume_parser = ResumeParser()
-        interview_agent = InterviewAgent()
-        
-        # Parse resume
-        resume_data = resume_parser.parse(resume_file)
-        
-        # Initialize interview context
-        interview_context = interview_agent.create_context(resume_data)
-        
-        # Start the interview session
-        success = interview_agent.start_session(interview_context)
-        
-        if not success:
-            return jsonify({'error': 'Failed to start interview session'}), 500
-        
-        return jsonify({
-            'status': 'success',
-            'message': 'Interview session started'
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    interview_agent = InterviewAgent()
+    interview_context = interview_agent.create_context(candidate_info)
+    interview_agent.start_session(interview_context)
+    return render_template('interview.html', candidate=candidate_info)
 
 def _process_interview_completion(interview_data):
     """
     Internal function to handle interview completion tasks
     - Stores evaluation
+    - Updates invite system database
     - Sends notifications if needed
     - Archives interview data
     """
     try:
-        # Get conversation ID for reference
+        # Get conversation ID and token for reference
         conversation_id = interview_data.get('conversation_id')
+        token = interview_data.get('token')
         
         # Store interview data and evaluation
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -69,6 +66,31 @@ def _process_interview_completion(interview_data):
         
         with open(filename, 'w') as f:
             json.dump(interview_data, f, indent=2)
+            
+        # Update invite system database with interview results
+        session = Session()
+        try:
+            # Update the invite record with interview results and mark as used
+            session.execute(
+                text("""
+                    UPDATE invite 
+                    SET interview_completed = 1,
+                        interview_results = :results,
+                        completed_at = :completed_at,
+                        is_used = 1
+                    WHERE token = :token
+                """),
+                {
+                    'token': token,
+                    'results': json.dumps(interview_data),
+                    'completed_at': datetime.utcnow().isoformat()
+                }
+            )
+            session.commit()
+        except Exception as db_error:
+            current_app.logger.error(f"Database update error: {str(db_error)}")
+        finally:
+            session.close()
             
         # Could add notification logic here
         # For example, notify HR system or send email to recruiter

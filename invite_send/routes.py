@@ -33,59 +33,7 @@ UPLOAD_HTML = '''
 </html>
 '''
 
-@bp.route('/send_invite', methods=['POST'])
-def send_invite():
-    email = request.form['email']
-    token = secrets.token_urlsafe(32)
-    expires_at = datetime.utcnow() + timedelta(hours=24)
-    invite = Invite(email=email, token=token, expires_at=expires_at)
-    db.session.add(invite)
-    db.session.commit()
-    link = url_for('invite.fill_form', token=token, _external=True)
-    send_email(email, 'Interview Invite', f'Click <a href="{link}">here</a> to fill your details.')
-    return 'Invite sent.'
-
-@bp.route('/fill_form/<token>', methods=['GET', 'POST'])
-def fill_form(token):
-    invite = Invite.query.filter_by(token=token).first_or_404()
-    if not invite.is_valid():
-        return 'Link expired or already used.'
-    if request.method == 'POST':
-        form_data = request.form.to_dict()
-        # Save resume file
-        resume_file = request.files.get('resume')
-        resume_filename = None
-        if resume_file:
-            import os
-            uploads_dir = os.path.join(os.path.dirname(__file__), 'uploads')
-            os.makedirs(uploads_dir, exist_ok=True)
-            resume_filename = f"{token}_{resume_file.filename}"
-            resume_path = os.path.join(uploads_dir, resume_filename)
-            resume_file.save(resume_path)
-            form_data['resume_path'] = resume_path
-        # Save interview time and set link expiry
-        interview_time = form_data.get('interview_time')
-        if interview_time:
-            from datetime import datetime, timedelta
-            # Parse the selected time and set expiry to 30 min after
-            start_time = datetime.fromisoformat(interview_time)
-            invite.expires_at = start_time + timedelta(minutes=30)
-            form_data['interview_time'] = interview_time
-        invite.form_data = form_data
-        invite.is_used = True
-        db.session.commit()
-        interview_token = secrets.token_urlsafe(32)
-        interview_link = url_for('invite.interview', token=interview_token, _external=True)
-        send_email(invite.email, 'Interview Link', f'Your interview link: <a href="{interview_link}">{interview_link}</a>')
-        return 'Form submitted. Check your email for the interview link.'
-    return render_template_string(INVITE_FORM_HTML)
-
-@bp.route('/interview/<token>')
-def interview(token):
-    # Token validation logic here (for demo, just show a message)
-    return 'Welcome to your interview!'
-
-@bp.route('/upload_candidates', methods=['GET', 'POST'])
+@bp.route('/', methods=['GET', 'POST'])
 def upload_candidates():
     message = None
     if request.method == 'POST':
@@ -137,3 +85,58 @@ def upload_candidates():
             else:
                 message = 'Unsupported file type.'
     return render_template_string(UPLOAD_HTML, message=message)
+
+@bp.route('/send_invite', methods=['POST'])
+def send_invite():
+    email = request.form['email']
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(hours=24)
+    invite = Invite(email=email, token=token, expires_at=expires_at)
+    db.session.add(invite)
+    db.session.commit()
+    link = url_for('invite.fill_form', token=token, _external=True)
+    send_email(email, 'Interview Invite', f'Click <a href="{link}">here</a> to fill your details.')
+    return 'Invite sent.'
+
+@bp.route('/fill_form/<token>', methods=['GET', 'POST'])
+def fill_form(token):
+    invite = Invite.query.filter_by(token=token).first_or_404()
+    if not invite.is_valid():
+        return 'Link expired or already used.'
+    if request.method == 'POST':
+        form_data = request.form.to_dict()
+        # Save resume file
+        resume_file = request.files.get('resume')
+        resume_filename = None
+        if resume_file:
+            import os
+            uploads_dir = os.path.join(os.path.dirname(__file__), 'uploads')
+            os.makedirs(uploads_dir, exist_ok=True)
+            resume_filename = f"{token}_{resume_file.filename}"
+            resume_path = os.path.join(uploads_dir, resume_filename)
+            resume_file.save(resume_path)
+            form_data['resume_path'] = resume_path
+        # Save interview time and set link expiry
+        interview_time = form_data.get('interview_time')
+        if interview_time:
+            from datetime import datetime, timedelta
+            # Parse the selected time and set expiry to 30 min after
+            start_time = datetime.fromisoformat(interview_time)
+            invite.expires_at = start_time + timedelta(minutes=30)
+            form_data['interview_time'] = interview_time
+        # Convert form_data dictionary to JSON string before storing
+        import json
+        invite.form_data = json.dumps(form_data)
+        # Don't mark as used yet - will be marked after interview completion
+        db.session.commit()
+        # Use the same token for the interview link
+        interview_link = url_for('invite.interview', token=token, _external=True)
+        send_email(invite.email, 'Interview Link', f'Your interview link: <a href="{interview_link}">{interview_link}</a>')
+        return 'Form submitted. Check your email for the interview link.'
+    return render_template_string(INVITE_FORM_HTML)
+
+@bp.route('/interview/<token>')
+def interview(token):
+    # Redirect to the AI interview app with the token
+    ai_interview_url = f"http://localhost:8000/interview/{token}"
+    return redirect(ai_interview_url)
