@@ -1,11 +1,19 @@
 # Ignore the instance folder (contains database and local files)
 instance/
 
-# Ignore Python cache files
+# Ignore Python cache files in all folders
 __pycache__/
+invite_send/__pycache__/
+ai_interview/__pycache__/
+app/__pycache__/
 *.pyc
 *.pyo
 *.pyd
 
 # Ignore Python virtual environment folder
 venv/
+
+invite_send/uploads/
+
+# Ignore instance folder (contains database and local files)
+instance/

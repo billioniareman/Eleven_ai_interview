@@ -18,20 +18,31 @@ class InterviewAgent:
         }
     
     def create_context(self, resume_data):
-        """Create interview context based on resume data"""
-        experience = resume_data.get('experience', [])
+        """Create interview context based on parsed resume data"""
+        # Extract fields from parsed resume data
+        professional_summary = resume_data.get('professional_summary', [])
+        candidate_information = resume_data.get('candidate_information', {})
+        education = resume_data.get('education', [])
+        experience = resume_data.get('professional_experience', [])
         skills = resume_data.get('skills', [])
-        
+        certifications = resume_data.get('certifications', [])
+        projects = resume_data.get('relevant_projects', [])
+        links = resume_data.get('important_link', [])
+
         context = {
+            "professional_summary": professional_summary,
+            "candidate_information": candidate_information,
+            "education": education,
             "candidate_experience": experience,
             "technical_skills": skills,
+            "certifications": certifications,
+            "projects": projects,
+            "links": links,
             "interview_stage": "initial",
             "questions_asked": []
         }
-        
         self.interview_data["candidate_info"] = resume_data
         self.interview_data["timestamp"] = datetime.now().isoformat()
-        
         return context
 
     def store_conversation(self, speaker, text):

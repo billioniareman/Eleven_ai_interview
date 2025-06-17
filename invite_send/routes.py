@@ -105,33 +105,55 @@ def fill_form(token):
         return 'Link expired or already used.'
     if request.method == 'POST':
         form_data = request.form.to_dict()
-        # Save resume file
         resume_file = request.files.get('resume')
         resume_filename = None
+        parsed_resume_data = {}
         if resume_file:
             import os
+            import requests
+            import base64
             uploads_dir = os.path.join(os.path.dirname(__file__), 'uploads')
             os.makedirs(uploads_dir, exist_ok=True)
             resume_filename = f"{token}_{resume_file.filename}"
             resume_path = os.path.join(uploads_dir, resume_filename)
             resume_file.save(resume_path)
             form_data['resume_path'] = resume_path
+
+            # Upload to S3 via API
+            upload_api_url = "https://dev-api.supersourcing.com/user-management-service/api/v2/engineers/file-upload-to-google-cloud?type=doc"
+            headers = {"Authorization": "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NTAxMzczOTUsInVzZXJfaWQiOiI2M2M3ZjMxODNhM2FjMjUwOGI2NTQ5NjgiLCJlbWFpbCI6ImFkbWluQGFkbWluLmNvbSIsInVzZXJfbmFtZSI6InJhaHVsIHNpbmdoIiwiZGVwYXJ0bWVudF9pZCI6MjQsImRlcGFydG1lbnRfc2x1Z19uYW1lIjoiQWRtaW4iLCJkZXBhcnRtZW50X25hbWUiOiJhZG1pbiIsImRlcGFydG1lbnRfZ3JhZGVfaWQiOjEwOSwicHJvZmlsZV9waWMiOiJodHRwczovL3N0b3JhZ2UuZ29vZ2xlYXBpcy5jb20vc3VwZXJzb3VyY2luZy1pbWctZGV2Lzc5NGJkOWFlLTljNjgtNGQ5NS1iY2I0LTA1MDQ0Y2I0ZWU0ZC5qcGciLCJtb2JpbGVfbnVtYmVyIjoiKzkxOTcxMzAwOTgyOCIsImxldmVsIjoidG9wIiwiZXhwIjoxNzUwNjU1Nzk1LCJ0b2tlbl9leHBpcmVfYXQiOiIyMDI1LTA2LTIzIDA1OjE2OjM1In0.qXEZGEIGoHzUgQ6fYjbEZpYZ3ar7VQOwkmbBiWXCtwQ"}
+            files = {'file': (resume_file.filename, open(resume_path, 'rb'))}
+            upload_response = requests.post(upload_api_url, headers=headers, files=files)
+            upload_json = upload_response.json()
+            if upload_response.status_code == 200 and upload_json.get('success'):
+                uploaded_url = upload_json.get('data', {}).get('signedUrl')
+                if not uploaded_url:
+                    print("Upload API response missing 'signedUrl':", upload_json)
+                    return "Resume upload failed: No URL returned from API.", 500
+                # Parse resume using parsing API
+                encoded_url = base64.b64encode(uploaded_url.encode()).decode()
+                parse_api_url = f"https://staging-api.supersourcing.com/user-management-service/api/v1/engineers/get-resume-data-resume-parser/{encoded_url}"
+                parse_headers = {"Authorization": "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3NTAxMzczOTUsInVzZXJfaWQiOiI2M2M3ZjMxODNhM2FjMjUwOGI2NTQ5NjgiLCJlbWFpbCI6ImFkbWluQGFkbWluLmNvbSIsInVzZXJfbmFtZSI6InJhaHVsIHNpbmdoIiwiZGVwYXJ0bWVudF9pZCI6MjQsImRlcGFydG1lbnRfc2x1Z19uYW1lIjoiQWRtaW4iLCJkZXBhcnRtZW50X25hbWUiOiJhZG1pbiIsImRlcGFydG1lbnRfZ3JhZGVfaWQiOjEwOSwicHJvZmlsZV9waWMiOiJodHRwczovL3N0b3JhZ2UuZ29vZ2xlYXBpcy5jb20vc3VwZXJzb3VyY2luZy1pbWctZGV2Lzc5NGJkOWFlLTljNjgtNGQ5NS1iY2I0LTA1MDQ0Y2I0ZWU0ZC5qcGciLCJtb2JpbGVfbnVtYmVyIjoiKzkxOTcxMzAwOTgyOCIsImxldmVsIjoidG9wIiwiZXhwIjoxNzUwNjU1Nzk1LCJ0b2tlbl9leHBpcmVfYXQiOiIyMDI1LTA2LTIzIDA1OjE2OjM1In0.qXEZGEIGoHzUgQ6fYjbEZpYZ3ar7VQOwkmbBiWXCtwQ"}
+                parse_response = requests.get(parse_api_url, headers=parse_headers)
+                if parse_response.status_code == 200 and parse_response.json().get('success'):
+                    parsed_resume_data = parse_response.json()['data']
+                    form_data['parsed_resume'] = parsed_resume_data
+            else:
+                print("Upload API error:", upload_json)
+                return f"Resume upload failed: {upload_json.get('message', 'Unknown error')}", 500
         # Save interview time and set link expiry
         interview_time = form_data.get('interview_time')
         if interview_time:
             from datetime import datetime, timedelta
-            # Parse the selected time and set expiry to 30 min after
             start_time = datetime.fromisoformat(interview_time)
             invite.expires_at = start_time + timedelta(minutes=30)
             form_data['interview_time'] = interview_time
-        # Convert form_data dictionary to JSON string before storing
+        # Merge parsed resume data into form_data for later use
         import json
         invite.form_data = json.dumps(form_data)
-        # Don't mark as used yet - will be marked after interview completion
         db.session.commit()
-        # Use the same token for the interview link
         interview_link = url_for('invite.interview', token=token, _external=True)
-        send_email(invite.email, 'Interview Link', f'Your interview link: <a href="{interview_link}">{interview_link}</a>')
+        send_email(invite.email, 'Interview Link', f'Your interview link: <a href="{interview_link}">Here</a>')
         return 'Form submitted. Check your email for the interview link.'
     return render_template_string(INVITE_FORM_HTML)
 
