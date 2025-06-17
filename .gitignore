@@ -1,0 +1,11 @@
+# Ignore the instance folder (contains database and local files)
+instance/
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore Python virtual environment folder
+venv/
