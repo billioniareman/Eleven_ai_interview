@@ -102,12 +102,17 @@ class InterviewAgent:
     def end_session(self):
         """End the interview session and generate evaluation"""
         if self.conversation:
-            conversation_id = self.conversation.end_session()
+            try:
+                conversation_id = self.conversation.end_session()
+            except Exception as e:
+                print(f"Exception during conversation end_session: {e}")
+                conversation_id = None
             self.interview_data["conversation_id"] = conversation_id
             self.evaluate_interview()
-            
             # Save interview data to file
-            with open(f"interview_{conversation_id}.json", "w") as f:
-                json.dump(self.interview_data, f, indent=2)
-            
+            try:
+                with open(f"interview_{conversation_id}.json", "w") as f:
+                    json.dump(self.interview_data, f, indent=2)
+            except Exception as e:
+                print(f"Exception saving interview data: {e}")
             return self.interview_data
