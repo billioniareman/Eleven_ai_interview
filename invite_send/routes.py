@@ -160,5 +160,5 @@ def fill_form(token):
 @bp.route('/interview/<token>')
 def interview(token):
     # Redirect to the AI interview app with the token
-    ai_interview_url = f"https://eleven-ai-interview.onrender.com/interview/{token}"
+    ai_interview_url = f"http://127.0.0.1:8000/interview/{token}"
     return redirect(ai_interview_url)
