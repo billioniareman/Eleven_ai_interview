@@ -28,6 +28,8 @@ def interview(token):
     if not result:
         abort(404, 'Invalid or expired interview link.')
     
+    # Access columns by index since we're using raw SQL
+    # Columns order: id, email, token, form_data, created_at, expires_at, is_used
     expires_at = result[5]  # expires_at is at index 5
     is_used = result[6]     # is_used is at index 6
     form_data = result[3]   # form_data is at index 3
@@ -37,13 +39,11 @@ def interview(token):
     
     # Get candidate info - parse JSON string if it exists
     candidate_info = json.loads(form_data) if form_data else {}
-    # Use parsed resume data if available
-    resume_data = candidate_info.get('parsed_resume', candidate_info)
     
     # Start interview session (context)
     global interview_agent
     interview_agent = InterviewAgent()
-    interview_context = interview_agent.create_context(resume_data)
+    interview_context = interview_agent.create_context(candidate_info)
     interview_agent.start_session(interview_context)
     return render_template('interview.html', candidate=candidate_info)
 

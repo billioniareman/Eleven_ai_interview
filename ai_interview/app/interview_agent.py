@@ -5,10 +5,13 @@ from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInt
 from flask import current_app
 import json
 from datetime import datetime
+import threading
+import time
 
 class InterviewAgent:
     def __init__(self):
         self.client = ElevenLabs(api_key=current_app.config['ELEVENLABS_API_KEY'])
+        self.agent_id = current_app.config['AGENT_ID']
         self.conversation = None
         self.interview_data = {
             "timestamp": "",
@@ -16,28 +19,34 @@ class InterviewAgent:
             "conversation_history": [],
             "evaluation": {}
         }
-    
+        # Initialize tools
+        self.job_description = None
+        self.interview_framework = None
+        self.scoring_system = {
+            "technical_score": 0,
+            "communication_score": 0,
+            "total_questions_asked": 0,
+            "correct_responses": 0
+        }
+        self.time_tracker = {
+            "start_time": None,
+            "end_time": None,
+            "duration": 0,
+            "max_duration": 600  # 10 minutes in seconds
+        }
+        self.interview_active = False
+
     def create_context(self, resume_data):
         """Create interview context based on parsed resume data"""
-        # Extract fields from parsed resume data
-        professional_summary = resume_data.get('professional_summary', [])
-        candidate_information = resume_data.get('candidate_information', {})
-        education = resume_data.get('education', [])
-        experience = resume_data.get('professional_experience', [])
-        skills = resume_data.get('skills', [])
-        certifications = resume_data.get('certifications', [])
-        projects = resume_data.get('relevant_projects', [])
-        links = resume_data.get('important_link', [])
-
         context = {
-            "professional_summary": professional_summary,
-            "candidate_information": candidate_information,
-            "education": education,
-            "candidate_experience": experience,
-            "technical_skills": skills,
-            "certifications": certifications,
-            "projects": projects,
-            "links": links,
+            "professional_summary": resume_data.get('professional_summary', []),
+            "candidate_information": resume_data.get('candidate_information', {}),
+            "education": resume_data.get('education', []),
+            "candidate_experience": resume_data.get('professional_experience', []),
+            "technical_skills": resume_data.get('skills', []),
+            "certifications": resume_data.get('certifications', []),
+            "projects": resume_data.get('relevant_projects', []),
+            "links": resume_data.get('important_link', []),
             "interview_stage": "initial",
             "questions_asked": []
         }
@@ -53,9 +62,46 @@ class InterviewAgent:
             "timestamp": datetime.now().isoformat()
         })
 
+    def track_time(self):
+        """Monitor interview duration and end if exceeds 30 minutes"""
+        while self.interview_active:
+            if not self.time_tracker["start_time"]:
+                continue
+            current_time = datetime.now()
+            duration = (current_time - self.time_tracker["start_time"]).seconds
+            if duration >= self.time_tracker["max_duration"]:
+                print("Interview duration exceeded 10 minutes. Ending session...")
+                self.end_session()
+                break
+            time.sleep(10)  # Check every 10 seconds
+
+    def start_session(self, context):
+        """Start a new interview session"""
+        try:
+            self.conversation = Conversation(
+                client=self.client,
+                agent_id=self.agent_id,
+                requires_auth=True,
+                audio_interface=DefaultAudioInterface(),
+                callback_agent_response=lambda response: self.store_conversation("agent", response),
+                callback_user_transcript=lambda transcript: self.store_conversation("candidate", transcript)
+            )
+            # Initialize timing
+            self.time_tracker["start_time"] = datetime.now()
+            self.interview_active = True
+            # Start time tracking in separate thread
+            timer_thread = threading.Thread(target=self.track_time)
+            timer_thread.daemon = True
+            timer_thread.start()
+            # Start the conversation
+            self.conversation.start_session()
+            return True
+        except Exception as e:
+            print(f"Error starting session: {e}")
+            return False
+
     def evaluate_interview(self):
         """Evaluate the interview based on collected data"""
-        # Initialize evaluation structure
         evaluation = {
             "resume_validation": {
                 "experience_verified": False,
@@ -72,47 +118,28 @@ class InterviewAgent:
                 "response_quality": "",
                 "articulation": ""
             },
-            "overall_score": 0
+            "overall_score": 0,
+            "duration": self.time_tracker["duration"]
         }
-        
         self.interview_data["evaluation"] = evaluation
         return evaluation
-
-    def start_session(self, context):
-        """Start a new interview session"""
-        try:
-            self.conversation = Conversation(
-                self.client,
-                current_app.config['AGENT_ID'],
-                requires_auth=True,
-                audio_interface=DefaultAudioInterface(),
-                
-                # Enhanced callbacks to store conversation
-                callback_agent_response=lambda response: self.store_conversation("agent", response),
-                callback_user_transcript=lambda transcript: self.store_conversation("candidate", transcript),
-            )
-            
-            self.conversation.start_session()
-            return True
-            
-        except Exception as e:
-            print(f"Error starting session: {e}")
-            return False
 
     def end_session(self):
         """End the interview session and generate evaluation"""
         if self.conversation:
             try:
+                self.interview_active = False
+                self.time_tracker["end_time"] = datetime.now()
+                self.time_tracker["duration"] = (self.time_tracker["end_time"] - self.time_tracker["start_time"]).seconds
                 conversation_id = self.conversation.end_session()
-            except Exception as e:
-                print(f"Exception during conversation end_session: {e}")
-                conversation_id = None
-            self.interview_data["conversation_id"] = conversation_id
-            self.evaluate_interview()
-            # Save interview data to file
-            try:
-                with open(f"interview_{conversation_id}.json", "w") as f:
+                self.interview_data["conversation_id"] = conversation_id
+                # Generate final evaluation
+                self.evaluate_interview()
+                # Save interview data
+                filename = f"Interview_{conversation_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                with open(filename, "w") as f:
                     json.dump(self.interview_data, f, indent=2)
+                return self.interview_data
             except Exception as e:
-                print(f"Exception saving interview data: {e}")
-            return self.interview_data
+                print(f"Error ending session: {e}")
+                return None
