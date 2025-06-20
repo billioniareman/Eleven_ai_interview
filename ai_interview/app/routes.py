@@ -4,17 +4,24 @@ from flask_socketio import emit
 from app import socketio
 import json
 from datetime import datetime
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
 import os
+from pymongo import MongoClient
+from bson.objectid import ObjectId
 
 main = Blueprint('main', __name__)
 interview_agent = None
 
-# Connect to invite_send DB for token validation
-INVITE_DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../instance/invite_send.db'))
-engine = create_engine(f'sqlite:///{INVITE_DB_PATH}')
-Session = sessionmaker(bind=engine)
+# MongoDB connection for invite validation
+MONGO_URI = "mongodb+srv://admin:4sZf4uIsrlO6GCoV@staging-cluster.olgilw6.mongodb.net/user_management"
+client = MongoClient(MONGO_URI)
+db = client["interivew"]
+invite_collection = db["Invite"]
+
+def is_invite_valid(invite_doc):
+    return (
+        not invite_doc.get("is_used", False)
+        and datetime.utcnow() < invite_doc["expires_at"]
+    )
 
 @main.route('/')
 def index():
@@ -22,25 +29,16 @@ def index():
 
 @main.route('/interview/<token>')
 def interview(token):
-    # Validate token from invite_send
-    session = Session()
-    result = session.execute(text("SELECT * FROM invite WHERE token = :token"), {'token': token}).fetchone()
-    if not result:
+    # Validate token from MongoDB
+    invite = invite_collection.find_one({"token": token})
+    if not invite:
         abort(404, 'Invalid or expired interview link.')
-    
-    # Access columns by index since we're using raw SQL
-    # Columns order: id, email, token, form_data, created_at, expires_at, is_used
-    expires_at = result[5]  # expires_at is at index 5
-    is_used = result[6]     # is_used is at index 6
-    form_data = result[3]   # form_data is at index 3
-    
-    if is_used or datetime.utcnow() > datetime.fromisoformat(expires_at):
+    expires_at = invite["expires_at"]
+    is_used = invite.get("is_used", False)
+    form_data = invite.get("form_data")
+    if is_used or datetime.utcnow() > expires_at:
         abort(403, 'Interview link expired or already used.')
-    
-    # Get candidate info - parse JSON string if it exists
     candidate_info = json.loads(form_data) if form_data else {}
-    
-    # Start interview session (context)
     global interview_agent
     interview_agent = InterviewAgent()
     interview_context = interview_agent.create_context(candidate_info)
@@ -48,78 +46,39 @@ def interview(token):
     return render_template('interview.html', candidate=candidate_info)
 
 def _process_interview_completion(interview_data):
-    """
-    Internal function to handle interview completion tasks
-    - Stores evaluation
-    - Updates invite system database
-    - Sends notifications if needed
-    - Archives interview data
-    """
     try:
-        # Get conversation ID and token for reference
         conversation_id = interview_data.get('conversation_id')
         token = interview_data.get('token')
-        
-        # Store interview data and evaluation
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f"interview_records/{conversation_id}_{timestamp}.json"
-        
         with open(filename, 'w') as f:
             json.dump(interview_data, f, indent=2)
-            
-        # Update invite system database with interview results
-        session = Session()
-        try:
-            # Update the invite record with interview results and mark as used
-            session.execute(
-                text("""
-                    UPDATE invite 
-                    SET interview_completed = 1,
-                        interview_results = :results,
-                        completed_at = :completed_at,
-                        is_used = 1
-                    WHERE token = :token
-                """),
-                {
-                    'token': token,
-                    'results': json.dumps(interview_data),
-                    'completed_at': datetime.utcnow().isoformat()
-                }
-            )
-            session.commit()
-        except Exception as db_error:
-            current_app.logger.error(f"Database update error: {str(db_error)}")
-        finally:
-            session.close()
-            
-        # Could add notification logic here
-        # For example, notify HR system or send email to recruiter
-        
+        # Update invite in MongoDB
+        invite_collection.update_one(
+            {"token": token},
+            {"$set": {
+                "interview_completed": True,
+                "interview_results": json.dumps(interview_data),
+                "completed_at": datetime.utcnow(),
+                "is_used": True
+            }}
+        )
         current_app.logger.info(f"Interview {conversation_id} completed and processed")
-        
     except Exception as e:
         current_app.logger.error(f"Error processing interview completion: {str(e)}")
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    """Handle WebSocket disconnection and process interview completion"""
     global interview_agent
     if interview_agent:
         try:
-            # End session and get complete interview data with evaluation
             interview_data = interview_agent.end_session()
-            
-            # Process interview completion in the backend
             _process_interview_completion(interview_data)
-            
-            # Clear the interview agent
             interview_agent = None
-            
             emit('interview_ended', {
                 'status': 'completed',
                 'message': 'Thank you for completing the interview'
             })
-            
         except Exception as e:
             current_app.logger.error(f"Error during interview completion: {str(e)}")
             emit('interview_ended', {
@@ -129,7 +88,6 @@ def handle_disconnect():
 
 @socketio.on('pause_interview')
 def handle_pause():
-    """Handle interview pause"""
     global interview_agent
     if interview_agent and interview_agent.conversation:
         interview_agent.conversation.pause_session()
@@ -137,7 +95,6 @@ def handle_pause():
 
 @socketio.on('resume_interview')
 def handle_resume():
-    """Handle interview resume"""
     global interview_agent
     if interview_agent and interview_agent.conversation:
         interview_agent.conversation.resume_session()

@@ -1,20 +1,15 @@
-from flask_sqlalchemy import SQLAlchemy
+from pymongo import MongoClient
 from datetime import datetime, timedelta
-from flask import Flask
 
-db = SQLAlchemy()
+# MongoDB connection
+MONGO_URI = "mongodb+srv://admin:4sZf4uIsrlO6GCoV@staging-cluster.olgilw6.mongodb.net/user_management"
+client = MongoClient(MONGO_URI)
+db = client["interivew"]
+invite_collection = db["Invite"]
 
-class Invite(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    email = db.Column(db.String(120), nullable=False)
-    token = db.Column(db.String(64), unique=True, nullable=False)
-    form_data = db.Column(db.Text)  # JSON string of form data
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    expires_at = db.Column(db.DateTime, nullable=False)
-    is_used = db.Column(db.Boolean, default=False)
-    interview_completed = db.Column(db.Boolean, default=False)
-    interview_results = db.Column(db.Text)  # JSON string of interview results
-    completed_at = db.Column(db.DateTime)
-
-    def is_valid(self):
-        return not self.is_used and datetime.utcnow() < self.expires_at
+# Helper for invite validation
+def is_invite_valid(invite_doc):
+    return (
+        not invite_doc.get("is_used", False)
+        and datetime.utcnow() < invite_doc["expires_at"]
+    )

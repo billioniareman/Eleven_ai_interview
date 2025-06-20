@@ -1,8 +1,10 @@
 from flask import Blueprint, request, render_template_string, redirect, url_for, flash
-from .models import db, Invite
+from .models import invite_collection, is_invite_valid
 from .email_utils import send_email
 from datetime import datetime, timedelta
 import secrets
+from bson.objectid import ObjectId
+import json
 
 bp = Blueprint('invite', __name__)
 
@@ -45,17 +47,24 @@ def upload_candidates():
             emails_sent = 0
             if filename.endswith('.json'):
                 try:
-                    import json
                     candidates = json.load(file)
                     for candidate in candidates:
                         email = candidate.get('email')
                         if email:
-                            # Send invite to each candidate email
                             token = secrets.token_urlsafe(32)
                             expires_at = datetime.utcnow() + timedelta(hours=24)
-                            invite = Invite(email=email, token=token, expires_at=expires_at)
-                            db.session.add(invite)
-                            db.session.commit()
+                            invite_doc = {
+                                "email": email,
+                                "token": token,
+                                "expires_at": expires_at,
+                                "is_used": False,
+                                "interview_completed": False,
+                                "created_at": datetime.utcnow(),
+                                "form_data": None,
+                                "interview_results": None,
+                                "completed_at": None
+                            }
+                            invite_collection.insert_one(invite_doc)
                             link = url_for('invite.fill_form', token=token, _external=True)
                             send_email(email, 'Interview Invite', f'Click <a href="{link}">here</a> to fill your details.')
                             emails_sent += 1
@@ -73,9 +82,18 @@ def upload_candidates():
                         if email:
                             token = secrets.token_urlsafe(32)
                             expires_at = datetime.utcnow() + timedelta(hours=24)
-                            invite = Invite(email=email, token=token, expires_at=expires_at)
-                            db.session.add(invite)
-                            db.session.commit()
+                            invite_doc = {
+                                "email": email,
+                                "token": token,
+                                "expires_at": expires_at,
+                                "is_used": False,
+                                "interview_completed": False,
+                                "created_at": datetime.utcnow(),
+                                "form_data": None,
+                                "interview_results": None,
+                                "completed_at": None
+                            }
+                            invite_collection.insert_one(invite_doc)
                             link = url_for('invite.fill_form', token=token, _external=True)
                             send_email(email, 'Interview Invite', f'Click <a href="{link}">here</a> to fill your details.')
                             emails_sent += 1
@@ -91,17 +109,26 @@ def send_invite():
     email = request.form['email']
     token = secrets.token_urlsafe(32)
     expires_at = datetime.utcnow() + timedelta(hours=24)
-    invite = Invite(email=email, token=token, expires_at=expires_at)
-    db.session.add(invite)
-    db.session.commit()
+    invite_doc = {
+        "email": email,
+        "token": token,
+        "expires_at": expires_at,
+        "is_used": False,
+        "interview_completed": False,
+        "created_at": datetime.utcnow(),
+        "form_data": None,
+        "interview_results": None,
+        "completed_at": None
+    }
+    invite_collection.insert_one(invite_doc)
     link = url_for('invite.fill_form', token=token, _external=True)
     send_email(email, 'Interview Invite', f'Click <a href="{link}">here</a> to fill your details.')
     return 'Invite sent.'
 
 @bp.route('/fill_form/<token>', methods=['GET', 'POST'])
 def fill_form(token):
-    invite = Invite.query.filter_by(token=token).first_or_404()
-    if not invite.is_valid():
+    invite = invite_collection.find_one({"token": token})
+    if not invite or not is_invite_valid(invite):
         return 'Link expired or already used.'
     if request.method == 'POST':
         form_data = request.form.to_dict()
@@ -144,16 +171,14 @@ def fill_form(token):
         # Save interview time and set link expiry
         interview_time = form_data.get('interview_time')
         if interview_time:
-            from datetime import datetime, timedelta
             start_time = datetime.fromisoformat(interview_time)
-            invite.expires_at = start_time + timedelta(minutes=30)
+            invite['expires_at'] = start_time + timedelta(minutes=30)
             form_data['interview_time'] = interview_time
         # Merge parsed resume data into form_data for later use
-        import json
-        invite.form_data = json.dumps(form_data)
-        db.session.commit()
+        invite['form_data'] = json.dumps(form_data)
+        invite_collection.update_one({"_id": invite["_id"]}, {"$set": {"form_data": invite['form_data'], "expires_at": invite['expires_at']}})
         interview_link = url_for('invite.interview', token=token, _external=True)
-        send_email(invite.email, 'Interview Link', f'Your interview link: <a href="{interview_link}">Here</a>')
+        send_email(invite['email'], 'Interview Link', f'Your interview link: <a href="{interview_link}">Here</a>')
         return 'Form submitted. Check your email for the interview link.'
     return render_template_string(INVITE_FORM_HTML)
 
