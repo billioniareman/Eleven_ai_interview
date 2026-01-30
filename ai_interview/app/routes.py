@@ -12,7 +12,7 @@ main = Blueprint('main', __name__)
 interview_agent = None
 
 # MongoDB connection for invite validation
-MONGO_URI = "mongodb+srv://admin:4sZf4uIsrlO6GCoV@staging-cluster.olgilw6.mongodb.net/user_management"
+MONGO_URI = "mongodb://databaseAdmin:jPT9DdndRwXYW81wMv@34.93.211.233:27017/user_management_staging"
 client = MongoClient(MONGO_URI)
 db = client["interivew"]
 invite_collection = db["Invite"]

@@ -5,8 +5,17 @@ from datetime import datetime, timedelta
 import secrets
 from bson.objectid import ObjectId
 import json
+from pymongo.errors import PyMongoError
+import logging
+import os
+from pymongo import MongoClient
+from pymongo.errors import ServerSelectionTimeoutError
 
 bp = Blueprint('invite', __name__)
+
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
+MONGO_DB = os.environ.get("MONGO_DB", "eleven_ai")
+
 
 INVITE_FORM_HTML = '''
 <form method="post" enctype="multipart/form-data">
@@ -34,6 +43,78 @@ UPLOAD_HTML = '''
 </body>
 </html>
 '''
+
+PENDING_INVITES_FILE = os.path.join(os.path.dirname(__file__), 'pending_invites.json')
+
+def _store_pending_invite(invite_doc):
+    try:
+        if os.path.exists(PENDING_INVITES_FILE):
+            with open(PENDING_INVITES_FILE, 'r', encoding='utf-8') as f:
+                pending = json.load(f)
+        else:
+            pending = []
+    except Exception:
+        pending = []
+    pending.append(invite_doc)
+    with open(PENDING_INVITES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(pending, f, default=str, indent=2)
+
+# safe DB helpers to avoid AttributeError when invite_collection is None
+def safe_insert(invite_doc):
+    """
+    Try to insert into Mongo; on failure or if DB unavailable, store to pending file.
+    Returns True if inserted to DB, False otherwise.
+    """
+    if invite_collection is None:
+        logging.warning("MongoDB not available — storing invite to pending file.")
+        _store_pending_invite(invite_doc)
+        return False
+    try:
+        invite_collection.insert_one(invite_doc)
+        return True
+    except Exception:
+        # catch PyMongoError, AttributeError, or any other unexpected error
+        logging.exception("DB insert failed or invite_collection invalid, storing pending invite")
+        _store_pending_invite(invite_doc)
+        return False
+
+def safe_find_one(filter):
+    if invite_collection is None:
+        logging.warning("MongoDB not available — cannot find invite in DB.")
+        return None
+    try:
+        return invite_collection.find_one(filter)
+    except Exception:
+        logging.exception("DB read failed or invite_collection invalid")
+        return None
+
+def safe_update_one(filter, update, fallback_doc=None):
+    """
+    Try to update in DB; on failure store fallback_doc (or filter+update) to pending.
+    Returns True on success, False otherwise.
+    """
+    if invite_collection is None:
+        logging.warning("MongoDB not available — storing update to pending file.")
+        if fallback_doc:
+            _store_pending_invite(fallback_doc)
+        else:
+            _store_pending_invite({"filter": filter, "update": update})
+        return False
+    try:
+        invite_collection.update_one(filter, update)
+        return True
+    except Exception:
+        logging.exception("DB update failed or invite_collection invalid, storing pending update")
+        if fallback_doc:
+            _store_pending_invite(fallback_doc)
+        else:
+            _store_pending_invite({"filter": filter, "update": update})
+        return False
+
+# The `invite_collection` is provided by `invite_send.models` and is
+# already created (or set to None) in a guarded way. Avoid creating a
+# second MongoClient here to prevent duplicate connection attempts at
+# import time — use the imported `invite_collection` from `models.py`.
 
 @bp.route('/', methods=['GET', 'POST'])
 def upload_candidates():
@@ -64,11 +145,11 @@ def upload_candidates():
                                 "interview_results": None,
                                 "completed_at": None
                             }
-                            invite_collection.insert_one(invite_doc)
-                            link = url_for('invite.fill_form', token=token, _external=True)
-                            send_email(email, 'Interview Invite', f'Click <a href="{link}">here</a> to fill your details.')
-                            emails_sent += 1
-                    message = f"Successfully uploaded {len(candidates)} candidates from JSON. Sent {emails_sent} invites."
+                            inserted = safe_insert(invite_doc)
+                            if inserted:
+                                link = url_for('invite.fill_form', token=token, _external=True)
+                                send_email(email, 'Interview Invite', f'Click <a href="{link}">here</a> to fill your details.')
+                                emails_sent += 1
                 except Exception as e:
                     message = f"Error reading JSON: {e}"
             elif filename.endswith('.csv'):
@@ -93,11 +174,11 @@ def upload_candidates():
                                 "interview_results": None,
                                 "completed_at": None
                             }
-                            invite_collection.insert_one(invite_doc)
-                            link = url_for('invite.fill_form', token=token, _external=True)
-                            send_email(email, 'Interview Invite', f'Click <a href="{link}">here</a> to fill your details.')
-                            emails_sent += 1
-                    message = f"Successfully uploaded {len(candidates)} candidates from CSV. Sent {emails_sent} invites."
+                            inserted = safe_insert(invite_doc)
+                            if inserted:
+                                link = url_for('invite.fill_form', token=token, _external=True)
+                                send_email(email, 'Interview Invite', f'Click <a href="{link}">here</a> to fill your details.')
+                                emails_sent += 1
                 except Exception as e:
                     message = f"Error reading CSV: {e}"
             else:
@@ -120,14 +201,17 @@ def send_invite():
         "interview_results": None,
         "completed_at": None
     }
-    invite_collection.insert_one(invite_doc)
-    link = url_for('invite.fill_form', token=token, _external=True)
-    send_email(email, 'Interview Invite', f'Click <a href="{link}">here</a> to fill your details.')
-    return 'Invite sent.'
+    inserted = safe_insert(invite_doc)
+    if inserted:
+        link = url_for('invite.fill_form', token=token, _external=True)
+        send_email(email, 'Interview Invite', f'Click <a href="{link}">here</a> to fill your details.')
+        return 'Invite sent.'
+    else:
+        return 'DB unavailable, invite stored pending.'
 
 @bp.route('/fill_form/<token>', methods=['GET', 'POST'])
 def fill_form(token):
-    invite = invite_collection.find_one({"token": token})
+    invite = safe_find_one({"token": token})
     if not invite or not is_invite_valid(invite):
         return 'Link expired or already used.'
     if request.method == 'POST':
@@ -176,7 +260,11 @@ def fill_form(token):
             form_data['interview_time'] = interview_time
         # Merge parsed resume data into form_data for later use
         invite['form_data'] = json.dumps(form_data)
-        invite_collection.update_one({"_id": invite["_id"]}, {"$set": {"form_data": invite['form_data'], "expires_at": invite['expires_at']}})
+        # attempt DB update; on failure store pending with full invite doc
+        updated = safe_update_one({"_id": invite["_id"]}, {"$set": {"form_data": invite['form_data'], "expires_at": invite['expires_at']}}, fallback_doc=invite)
+        if not updated:
+            # already stored by safe_update_one; inform user conservatively
+            return 'Form submitted but DB currently unavailable. We will process it shortly.'
         interview_link = url_for('invite.interview', token=token, _external=True)
         send_email(invite['email'], 'Interview Link', f'Your interview link: <a href="{interview_link}">Here</a>')
         return 'Form submitted. Check your email for the interview link.'
